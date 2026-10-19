@@ -1,0 +1,13 @@
+{
+  "name": "agent-hub",
+  "version": "0.1.0",
+  "description": "Agent Hub: a pane for this session's context fill, task checklist and subagents",
+  "author": {
+    "name": "quang2512",
+    "url": "https://github.com/quang2512"
+  },
+  "homepage": "https://github.com/quang2512/agent-hub",
+  "repository": "https://github.com/quang2512/agent-hub",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

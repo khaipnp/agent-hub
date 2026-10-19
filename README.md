@@ -1,0 +1,94 @@
+# Agent Hub
+
+A pane inside Claude Code that shows, live, what the session is doing:
+
+```
+ ▐▛███▜▌   ▟▛▜▙▗█▀▀▘█▛▀▘█▙ █▌▀▜█▀▘ ▐█ █▌█▌▐█▐█▀█▖
+▝▜█████▛▘  █▙▟█▐█▗▄▖█▛▀ █▛██▌ ▐█   ▐█▀█▌█▌▐█▐█▀█▖
+  ▘▘ ▝▝    █▌▐█▝█▄█▌█▙▄▖█▌▝█▌ ▐█   ▐█ █▌▜▙▟▛▐█▄█▘
+──────────────────────────────────────────────────────
+Context: 23% · 230k / 1.0M tok
+████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+──────────────────────────────────────────────────────
+Tasks: 1 in progress · 2 pending · 1 done · 7 tools
+✳ Writing the parser… (1:12 · 7 tools)
+  ⎿ ✔ Read the spec
+    ■ Write the parser
+        Read src/parse.ts · Edit src/parse.ts · Bash npm test
+    □ Add tests
+    □ Update the docs
+──────────────────────────────────────────────────────
+Subagents: 1 running · 1 done · 31 tools · 48k tok · $0.42
+╭─ ● Explore ───────────────────────── 0:42 · 13k tok ─╮
+│ map the routes                                       │
+│   Grep "router" · Read src/routes.ts · Glob src/**   │
+╰──────────────────────────────────────────────────────╯
+```
+
+- **Context**: how full the session's context window is, as one bar the width of the pane (red from 80%).
+- **Tasks**: the main conversation's checklist, with the tool calls made under the item in progress. A finished item folds to a count.
+- **Subagents**: one card per subagent of the latest prompt, plus any still running: its type, elapsed time, tokens, the steps it has taken and, if it keeps one, its checklist. A finished card folds to one line.
+
+## Install
+
+At the prompt of a Claude Code terminal session:
+
+```
+/plugin install agent-hub --marketplace quang2512/agent-hub
+```
+
+Answer `y` to add the marketplace, then pick a scope (user scope is the first choice).
+
+From a shell:
+
+```
+claude plugin install agent-hub --marketplace quang2512/agent-hub
+```
+
+In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `quang2512/agent-hub`, then **Add plugin**.
+
+Agent Hub is a hooks module ("mod"), so it needs a Claude Code build that runs function-hook plugins (built and tested on 2.1.302).
+
+## Use
+
+The pane opens by itself when a session starts and the terminal is wide enough; `/agent-hub` opens it and gives it the keyboard at any width.
+
+| Key | Where | Does |
+| --- | --- | --- |
+| ↑ ↓ / Tab | list | move between cards |
+| Enter | list | open a subagent's detail: every step and its status |
+| `e` | list | compact / expanded cards |
+| `a` | list | all subagents of the session / only the latest prompt's |
+| `m` | list | show the main conversation |
+| `b` | detail | back to the list |
+| `v` | detail | view the subagent's transcript |
+| `s` `s` | detail | stop the subagent (press twice within 3 s) |
+| Message box | detail | send the subagent a message |
+
+A card warns when a subagent may be stuck: no step for two minutes, the same call repeated, or several errors in a row.
+
+### Checklists for subagents
+
+Subagents have no checklist tool of their own, so Agent Hub registers one, `mcp__agent-hub__checklist`. A subagent that calls it shows its checklist inside its card, with its calls under the item in progress. Ask for it in the prompt you give the subagent, for example: *"Keep a checklist with the checklist tool."*
+
+## Develop
+
+```
+git clone https://github.com/quang2512/agent-hub
+claude --plugin-dir ./agent-hub        # load it for one session, reloading on save
+claude plugin validate ./agent-hub     # what the engine sees and would refuse
+claude plugin test ./agent-hub         # the hooks/*.test.ts(x) suites
+```
+
+Once Claude Code has loaded the plugin it writes the API types to `.claude-plugin/types/`, and `npx tsc -p ./agent-hub` type-checks it.
+
+Layout:
+
+- `hooks/register.tsx`: the hooks and the pane
+- `hooks/roster.ts`, `steps.ts`, `plan.ts`: subagent roster, step log, checklists and tokens
+- `hooks/card.ts`, `layout.ts`: the hand-laid cards
+- `types/index.d.ts`: the state the pane keeps
+
+## License
+
+MIT

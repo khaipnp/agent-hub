@@ -1,0 +1,13 @@
+{
+  "name": "agent-hub",
+  "description": "Agent Hub: a Claude Code pane for the session's context fill, task checklist and subagents",
+  "owner": {
+    "name": "quang2512"
+  },
+  "plugins": [
+    {
+      "name": "agent-hub",
+      "source": "./"
+    }
+  ]
+}
