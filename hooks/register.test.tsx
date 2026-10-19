@@ -635,7 +635,7 @@ test('the rate-limit windows are drawn five hours first, names and reset marks i
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
 
-  expect(await ui.find({ type: 'Text', text: /^5h 40% · ↻\d\d:\d\d   7d 85% · ↻[A-Z][a-z]{2} \d\d:\d\d$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^5h 40% · ↻ \d\d:\d\d   7d 85% · ↻ [A-Z][a-z]{2} \d\d:\d\d$/ })).toBeDefined()
   expect((await ui.find({ type: 'Text', text: /^5h$/ }))?.props.color).toBe('claude')
   expect((await ui.find({ type: 'Text', text: /^   7d$/ }))?.props.color).toBe('claude')
   expect((await ui.find({ type: 'Text', text: /^↻$/ }))?.props.color).toBe('claude')
@@ -658,7 +658,7 @@ test('the windows share one line at the pane foot', async ($, on) => {
   const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
 
   expect(await ui.find({ type: 'Text', text: /^Context: 23% · 230k \/ 1\.0M tok$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^5h 40% · ↻\d\d:\d\d   7d 12% · ↻[A-Z][a-z]{2} \d\d:\d\d$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^5h 40% · ↻ \d\d:\d\d   7d 12% · ↻ [A-Z][a-z]{2} \d\d:\d\d$/ })).toBeDefined()
   // Below the subagents, at the foot.
   const texts = (await ui.findAll({ type: 'Text' })).map(found => found.text)
   expect(texts.findIndex(text => text.startsWith('5h '))).toBeGreaterThan(texts.findIndex(text => text.startsWith('Subagents')))
