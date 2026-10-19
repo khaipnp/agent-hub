@@ -15,6 +15,8 @@ import {
   applyUsage,
   formatTokens,
   formatUsd,
+  limitParts,
+  orderLimits,
   planProgress,
   settleLive,
   totalTokens,
@@ -103,6 +105,7 @@ const contextFill = atom({ plugin: 'agent-hub', key: 'context' } as const, null)
 const BAR_COLOR = 'claude'
 const BAR_FULL_COLOR = 'error'
 const sessionCost = atom({ plugin: 'agent-hub', key: 'sessionCostUsd' } as const, null)
+const rateLimits = atom({ plugin: 'agent-hub', key: 'rateLimits' } as const, [])
 // The steps a running agent's expanded card lists; a finished agent's card
 // folds to one line, and the detail view lists them all.
 const CARD_STEPS = 8
@@ -316,9 +319,10 @@ export const register: Register = on => {
       .catch(() => undefined)
     void $.session
       .usage()
-      .then(({ cost, context }) =>
+      .then(({ cost, context, rateLimits: limits }) =>
         Promise.all([
           cost === undefined ? undefined : update($, sessionCost, () => cost.usd),
+          update($, rateLimits, () => orderLimits(limits)),
           context.tokens === undefined
             ? undefined
             : update($, contextFill, () => ({ tokens: context.tokens ?? 0, window: context.window })),
@@ -343,6 +347,9 @@ export const register: Register = on => {
   on('session.measure', async ($, e, next) => {
     const usd = e.cost?.usd
     if (usd !== undefined) await update($, sessionCost, () => usd).catch(() => undefined)
+    if (e.changed.includes('rateLimits')) {
+      await update($, rateLimits, () => orderLimits(e.rateLimits)).catch(() => undefined)
+    }
     const tokens = e.context.tokens
     if (tokens !== undefined) {
       await update($, contextFill, () => ({ tokens, window: e.context.window })).catch(() => undefined)
@@ -504,6 +511,7 @@ export const register: Register = on => {
     const expanded = await read($, isExpanded)
     const cost = await read($, sessionCost)
     const fill = await read($, contextFill)
+    const limits = await read($, rateLimits)
     const isAll = await read($, showAll)
     const checklist = await read($, tasks)
     const logs = await read($, taskLogs)
@@ -984,6 +992,31 @@ export const register: Register = on => {
       </Box>
     )
 
+    // The account's rate-limit windows on one line at the pane's foot: the
+    // name and the reset mark orange, the use bold, the time dim.
+    const usageGroup =
+      limits.length === 0 ? null : (
+        <Text>
+          {limits.map((limit, i) => {
+            const { name, used, reset } = limitParts(limit, t)
+
+            return (
+              <Text key={`limit:${i}`}>
+                <Text color={TITLE_COLOR}>{`${i > 0 ? '   ' : ''}${name}`}</Text>{' '}
+                <Text bold>{used}</Text>
+                {reset === '' ? null : (
+                  <Text>
+                    <Text dimColor> · </Text>
+                    <Text color={TITLE_COLOR}>↻</Text>
+                    <Text dimColor>{reset}</Text>
+                  </Text>
+                )}
+              </Text>
+            )
+          })}
+        </Text>
+      )
+
     // How full the session's context window is, as one bar the pane's width.
     const contextGroup = (() => {
       if (fill === null || fill.window <= 0) {
@@ -1050,52 +1083,57 @@ export const register: Register = on => {
       </Box>
     )
 
+    // Docked, the tree fills the pane's height so the usage sits at its foot.
     return (
-      <Box flexDirection="column">
-        {header}
-        {rule}
-        {contextGroup}
-        {rule}
-        {taskGroup}
-        {/* A rule between the groups, the pane's full width. */}
-        <Text dimColor>{'─'.repeat(Math.max(1, columns))}</Text>
-        <Text>
-          <Text bold>
-            <Text color={TITLE_COLOR}>{isAll ? 'All subagents' : 'Subagents'}</Text>: {active} running ·{' '}
-            {lines.length - active} done
+      <Box flexDirection="column" minHeight={e.props.placement === 'dock' ? e.props.scroll.bodyRows : undefined}>
+        <Box flexDirection="column" flexGrow={1}>
+          {header}
+          {rule}
+          {contextGroup}
+          {rule}
+          {taskGroup}
+          {/* A rule between the groups, the pane's full width. */}
+          <Text dimColor>{'─'.repeat(Math.max(1, columns))}</Text>
+          <Text>
+            <Text bold>
+              <Text color={TITLE_COLOR}>{isAll ? 'All subagents' : 'Subagents'}</Text>: {active} running ·{' '}
+              {lines.length - active} done
+            </Text>
+            <Text dimColor>{overview}</Text>
+            {stuckCount > 0 && <Text color="warning"> · ⚠ {stuckCount} may be stuck</Text>}
           </Text>
-          <Text dimColor>{overview}</Text>
-          {stuckCount > 0 && <Text color="warning"> · ⚠ {stuckCount} may be stuck</Text>}
-        </Text>
-        {(hidden > 0 || isAll || lines.length > 0) && (
-          <Box flexDirection="row" flexWrap="wrap" columnGap={3}>
-            {(hidden > 0 || isAll) && (
-              <Button
-                key="all"
-                plain
-                hotkey="a"
-                label={isAll ? 'latest only' : `all (+${hidden})`}
-                onPress={() => update($, showAll, all => !all)}
-              />
-            )}
-            {lines.length > 0 && (
-              <Button
-                key="expand"
-                plain
-                hotkey="e"
-                label={expanded ? 'compact' : 'expand'}
-                onPress={() => update($, isExpanded, isOn => !isOn)}
-              />
-            )}
-          </Box>
-        )}
-        {banner}
-        {lines.map(({ row, depth }) => card(row, depth))}
-        {lines.length > 0 && (
-          <Text dimColor>
-            {e.props.isFocused ? 'tab: next card · enter: open · e: compact/expand · a: all agents' : 'ctrl+x tab: select a card'}
-          </Text>
-        )}
+          {(hidden > 0 || isAll || lines.length > 0) && (
+            <Box flexDirection="row" flexWrap="wrap" columnGap={3}>
+              {(hidden > 0 || isAll) && (
+                <Button
+                  key="all"
+                  plain
+                  hotkey="a"
+                  label={isAll ? 'latest only' : `all (+${hidden})`}
+                  onPress={() => update($, showAll, all => !all)}
+                />
+              )}
+              {lines.length > 0 && (
+                <Button
+                  key="expand"
+                  plain
+                  hotkey="e"
+                  label={expanded ? 'compact' : 'expand'}
+                  onPress={() => update($, isExpanded, isOn => !isOn)}
+                />
+              )}
+            </Box>
+          )}
+          {banner}
+          {lines.map(({ row, depth }) => card(row, depth))}
+          {lines.length > 0 && (
+            <Text dimColor>
+              {e.props.isFocused ? 'tab: next card · enter: open · e: compact/expand · a: all agents' : 'ctrl+x tab: select a card'}
+            </Text>
+          )}
+        </Box>
+        {usageGroup === null ? null : rule}
+        {usageGroup}
       </Box>
     )
   })

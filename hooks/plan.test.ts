@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { applyPlan, applyStepUsage, currentTaskAfter, nextPlan, planFromTaskList, stampStarts, applyUsage, formatTokens, formatUsd, planProgress, settleLive, totalTokens, usageOf } from './plan'
+import { applyPlan, applyStepUsage, currentTaskAfter, nextPlan, planFromTaskList, stampStarts, applyUsage, formatTokens, limitParts, formatUsd, planProgress, settleLive, totalTokens, usageOf } from './plan'
 import { applyTurnBegin, applyTurnEnd } from './steps'
 
 const usage = (input: number, output: number, model = 'claude-sonnet-5-5') => ({
@@ -155,6 +155,17 @@ describe('tokens', () => {
   test('dollars read short', () => {
     expect(formatUsd(0.4321)).toBe('$0.43')
     expect(formatUsd(12.6)).toBe('$13')
+  })
+
+  test('a rate-limit window reads as its name, its use and when it resets', () => {
+    // Local times, so the test reads the same in any time zone.
+    const now = new Date(2026, 9, 19, 10, 5).getTime()
+    const at = (day: number, hour: number, minute: number) => new Date(2026, 9, day, hour, minute).toISOString()
+
+    expect(limitParts({ kind: 'five_hour', percentUsed: 40.4, resetsAt: at(19, 14, 30) }, now)).toEqual({ name: '5h', used: '40%', reset: '14:30' })
+    expect(limitParts({ kind: 'seven_day', percentUsed: 12, resetsAt: at(22, 9, 0) }, now)).toEqual({ name: '7d', used: '12%', reset: 'Thu 09:00' })
+    expect(limitParts({ kind: 'spend_limit', percentUsed: 0.3 }, now)).toEqual({ name: 'spend', used: '<1%', reset: '' })
+    expect(limitParts({ kind: 'weekly_opus', percentUsed: 100 }, now)).toEqual({ name: 'weekly_opus', used: '100%', reset: '' })
   })
 
   test('token counts read short', () => {

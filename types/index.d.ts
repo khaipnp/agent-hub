@@ -100,6 +100,16 @@ export type AgentActivity = {
   live?: TokenUsage
 }
 
+/** One rate-limit window of the account, as the session's last response reported it. */
+export type RateLimitRow = {
+  /** `five_hour`, `seven_day`, or a gateway's `spend_limit`. */
+  kind: string
+  /** 0 to 100; past 100 on an exceeded spend limit. */
+  percentUsed: number
+  /** When the window starts over, as an ISO 8601 timestamp. */
+  resetsAt?: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'agent-hub': {
@@ -122,6 +132,8 @@ declare module 'claude-code' {
       context: { tokens: number; window: number } | null
       /** What the whole session has cost, in US dollars, as /cost totals it; null before a reading. */
       sessionCostUsd: number | null
+      /** The account's rate-limit windows, five hours first; empty off a subscription or before a reading. */
+      rateLimits: RateLimitRow[]
       /** The person's prompts so far, counted: each one starts a task. */
       task: number
       /** The list shows every agent of the session, not only the latest task's. */

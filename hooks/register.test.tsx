@@ -17,6 +17,7 @@ function engine(on: On) {
   on('agent.list', () => ({ value: roster.list }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
+  on('session.measure', (_$, e) => ({ changed: e.changed ?? [] }))
   const clock = mock.clock(on, { now: 1_000_000 })
 
   return { roster, clock }
@@ -394,7 +395,7 @@ test('tokens move with each model step, the session cost and stuck agents show',
   for await (const _chunk of steps as AsyncIterable<unknown>) {
     // the stream passes through untouched
   }
-  await $.session.measure({ cost: { usd: 1.234 } } as never)
+  await $.session.measure({ context: { window: 1_000_000 }, rateLimits: [], cost: { usd: 1.234 }, changed: ['cost'] } as never)
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
 
@@ -608,16 +609,69 @@ test('in a card, the calls since an item began sit under it, aligned with the ot
 
 test('the context bar fills the pane width in proportion to the window', async ($, on) => {
   const { clock } = engine(on)
-  await $.session.measure({ context: { tokens: 230_000, window: 1_000_000, percent: 23 } } as never)
+  await $.session.measure({ context: { tokens: 230_000, window: 1_000_000, percent: 23 }, rateLimits: [], changed: ['context'] } as never)
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
 
   expect(await ui.find({ type: 'Text', text: 'Context: 23%' })).toBeDefined()
-  expect((await ui.find({ type: 'Text', text: 'Context' }))?.props.color).toBe('claude')
+  expect((await ui.find({ type: 'Text', text: /^Context$/ }))?.props.color).toBe('claude')
   expect(await ui.find({ type: 'Text', text: ' · 230k / 1.0M tok' })).toBeDefined()
   // 23% of an 80-column pane: 18 solid orange cells, the rest shaded.
-  expect((await ui.find({ type: 'Text', text: '█'.repeat(18) }))?.props.color).toBe('claude')
+  expect((await ui.find({ type: 'Text', text: /^█{18}$/ }))?.props.color).toBe('claude')
   expect(await ui.find({ type: 'Text', text: '░'.repeat(62) })).toBeDefined()
+})
+
+test('the rate-limit windows are drawn five hours first, names and reset marks in orange', async ($, on) => {
+  const { clock } = engine(on)
+  const resetsAt = (hours: number) => new Date(1_000_000 + hours * 3_600_000).toISOString()
+  await $.session.measure({
+    context: { tokens: 230_000, window: 1_000_000, percent: 23 },
+    rateLimits: [
+      { kind: 'seven_day', percentUsed: 85, resetsAt: resetsAt(72) },
+      { kind: 'five_hour', percentUsed: 40, resetsAt: resetsAt(2) },
+    ],
+    changed: ['context', 'rateLimits'],
+  } as never)
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  expect(await ui.find({ type: 'Text', text: /^5h 40% · ↻\d\d:\d\d   7d 85% · ↻[A-Z][a-z]{2} \d\d:\d\d$/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^5h$/ }))?.props.color).toBe('claude')
+  expect((await ui.find({ type: 'Text', text: /^   7d$/ }))?.props.color).toBe('claude')
+  expect((await ui.find({ type: 'Text', text: /^↻$/ }))?.props.color).toBe('claude')
+  // Figures only: a window nearly used up reads as any other.
+  expect((await ui.find({ type: 'Text', text: /^85%$/ }))?.props).toEqual({ bold: true })
+})
+
+test('the windows share one line at the pane foot', async ($, on) => {
+  const { clock } = engine(on)
+  const resetsAt = (hours: number) => new Date(1_000_000 + hours * 3_600_000).toISOString()
+  await $.session.measure({
+    context: { tokens: 230_000, window: 1_000_000, percent: 23 },
+    rateLimits: [
+      { kind: 'five_hour', percentUsed: 40, resetsAt: resetsAt(2) },
+      { kind: 'seven_day', percentUsed: 12, resetsAt: resetsAt(72) },
+    ],
+    changed: ['context', 'rateLimits'],
+  } as never)
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  expect(await ui.find({ type: 'Text', text: /^Context: 23% · 230k \/ 1\.0M tok$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^5h 40% · ↻\d\d:\d\d   7d 12% · ↻[A-Z][a-z]{2} \d\d:\d\d$/ })).toBeDefined()
+  // Below the subagents, at the foot.
+  const texts = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+  expect(texts.findIndex(text => text.startsWith('5h '))).toBeGreaterThan(texts.findIndex(text => text.startsWith('Subagents')))
+})
+
+test('no rate-limit window, no figure for one', async ($, on) => {
+  const { clock } = engine(on)
+  await $.session.measure({ context: { tokens: 230_000, window: 1_000_000, percent: 23 }, rateLimits: [], changed: ['context'] } as never)
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  expect(await ui.find({ type: 'Text', text: 'Context: 23%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /↻/ })).toBeUndefined()
 })
 
 test('the pane asks for room when it opens', async ($, on) => {

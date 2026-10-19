@@ -23,10 +23,13 @@ Subagents: 1 running · 1 done · 31 tools · 48k tok · $0.42
 │ map the routes                                       │
 │   Grep "router" · Read src/routes.ts · Glob src/**   │
 ╰──────────────────────────────────────────────────────╯
+──────────────────────────────────────────────────────
+5h 40% · ↻14:30   7d 12% · ↻Thu 09:00
 ```
 
 - **Context**: how full the session's context window is, as one bar the width of the pane (red from 80%).
 - **Tasks**: the main conversation's checklist, with the tool calls made under the item in progress. A finished item folds to a count.
+- **Usage**, at the foot: the account's 5-hour and 7-day limits on one line, how much of each is used and when it resets (↻; only when signed in with a Claude subscription).
 - **Subagents**: one card per subagent of the latest prompt, plus any still running: its type, elapsed time, tokens, the steps it has taken and, if it keeps one, its checklist. A finished card folds to one line.
 
 ## Install
