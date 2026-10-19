@@ -1,6 +1,14 @@
-# Agent Hub
+# Agent Hub: a live monitor pane for Claude Code
 
-A pane inside Claude Code that shows, live, what the session is doing:
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-D97757.svg)](#install)
+[![Release](https://img.shields.io/github/v/release/quang2512/agent-hub)](https://github.com/quang2512/agent-hub/releases)
+
+**Agent Hub is a Claude Code plugin that monitors your session live, in a pane beside the transcript:** how full the context window is, the task checklist with the tool calls under each item, every subagent's progress, tokens and cost, and your 5-hour and 7-day usage limits with when they reset. Use it to watch multi-agent runs, spot a stuck subagent, and see how close you are to compaction or a rate limit.
+
+<!-- Screenshot: add docs/screenshot.png (a real capture of the pane) and uncomment.
+![Agent Hub pane in Claude Code: context window bar, task checklist, subagent cards and 5h/7d usage limits](docs/screenshot.png)
+-->
 
 ```
  ▐▛███▜▌   ▟▛▜▙▗█▀▀▘█▛▀▘█▙ █▌▀▜█▀▘ ▐█ █▌█▌▐█▐█▀█▖
@@ -29,8 +37,13 @@ Subagents: 1 running · 1 done · 31 tools · 48k tok · $0.42
 
 - **Context**: how full the session's context window is, as one bar the width of the pane (red from 80%).
 - **Tasks**: the main conversation's checklist, with the tool calls made under the item in progress. A finished item folds to a count.
-- **Usage**, at the foot: the account's 5-hour and 7-day limits on one line, how much of each is used and when it resets (↻; only when signed in with a Claude subscription).
 - **Subagents**: one card per subagent of the latest prompt, plus any still running: its type, elapsed time, tokens, the steps it has taken and, if it keeps one, its checklist. A finished card folds to one line.
+- **Usage**, at the foot: the account's 5-hour and 7-day limits on one line, how much of each is used and when it resets (↻; only when signed in with a Claude subscription).
+
+## Requirements
+
+- Claude Code **2.1.302 or later**: Agent Hub is a hooks module ("mod") and needs a build that runs function-hook plugins. Check yours with `claude --version`.
+- A terminal session. The pane docks beside the transcript in fullscreen from 110 columns and sits above the prompt otherwise.
 
 ## Install
 
@@ -49,8 +62,6 @@ claude plugin install agent-hub --marketplace quang2512/agent-hub
 ```
 
 In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `quang2512/agent-hub`, then **Add plugin**.
-
-Agent Hub is a hooks module ("mod"), so it needs a Claude Code build that runs function-hook plugins (built and tested on 2.1.302).
 
 ## Use
 
@@ -73,6 +84,16 @@ A card warns when a subagent may be stuck: no step for two minutes, the same cal
 ### Checklists for subagents
 
 Subagents have no checklist tool of their own, so Agent Hub registers one, `mcp__agent-hub__checklist`. A subagent that calls it shows its checklist inside its card, with its calls under the item in progress. Ask for it in the prompt you give the subagent, for example: *"Keep a checklist with the checklist tool."*
+
+## FAQ
+
+**`/agent-hub` says "Unknown command" after installing.** Run `/reload-plugins --force` (without `--force` the reload is only offered), or start a new session. A plugin installed at local scope is enabled only in the project you installed it from.
+
+**The usage line does not show.** Claude Code reports the 5-hour and 7-day windows only when you sign in with a Claude subscription (Pro or Max). With an API key or a gateway there is nothing to show, so the line stays hidden.
+
+**Does it slow Claude down or send data anywhere?** No. It reads the session's own events and draws them; nothing leaves your machine.
+
+**How do I update it?** `claude plugin update agent-hub`, then `/reload-plugins --force`.
 
 ## Develop
 

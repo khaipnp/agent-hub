@@ -1,7 +1,7 @@
 {
   "name": "agent-hub",
   "version": "0.2.0",
-  "description": "Agent Hub: a pane for this session's context fill, task checklist and subagents",
+  "description": "Agent Hub: a live Claude Code pane for context fill, the task checklist, subagents and 5h/7d usage limits",
   "author": {
     "name": "quang2512",
     "url": "https://github.com/quang2512"
@@ -9,5 +9,6 @@
   "homepage": "https://github.com/quang2512/agent-hub",
   "repository": "https://github.com/quang2512/agent-hub",
   "license": "MIT",
+  "keywords": ["claude-code", "subagents", "monitor", "context-window", "usage-limits", "rate-limits", "tasks", "pane", "multi-agent"],
   "types": "./types/index.d.ts"
 }
