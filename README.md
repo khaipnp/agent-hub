@@ -32,7 +32,7 @@ Subagents: 1 running · 1 done · 31 tools · 48k tok · $0.42
 │   Grep "router" · Read src/routes.ts · Glob src/**   │
 ╰──────────────────────────────────────────────────────╯
 ──────────────────────────────────────────────────────
-5h 40% · ↻14:30   7d 12% · ↻Thu 09:00
+5h 40% · ↻ 14:30   7d 12% · ↻ Thu 09:00
 ```
 
 - **Context**: how full the session's context window is, as one bar the width of the pane (red from 80%).

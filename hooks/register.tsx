@@ -1008,7 +1008,7 @@ export const register: Register = on => {
                   <Text>
                     <Text dimColor> · </Text>
                     <Text color={TITLE_COLOR}>↻</Text>
-                    <Text dimColor>{reset}</Text>
+                    <Text dimColor>{` ${reset}`}</Text>
                   </Text>
                 )}
               </Text>
