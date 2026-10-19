@@ -1,6 +1,6 @@
 {
   "name": "agent-hub",
-  "description": "Agent Hub: a Claude Code pane for the session's context fill, task checklist and subagents",
+  "description": "Agent Hub: a live Claude Code pane for context fill, the task checklist, subagents and 5h/7d usage limits",
   "owner": {
     "name": "quang2512"
   },

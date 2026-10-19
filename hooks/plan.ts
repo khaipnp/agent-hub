@@ -1,4 +1,4 @@
-import type { AgentActivity, TodoItem, TodoStatus, TokenUsage } from '../types'
+import type { AgentActivity, RateLimitRow, TodoItem, TodoStatus, TokenUsage } from '../types'
 import { redact } from './steps'
 import type { Activity } from './steps'
 
@@ -204,6 +204,36 @@ export const totalTokens = (usage: TokenUsage): number =>
   usage.input + usage.output + usage.cacheRead + usage.cacheWrite
 
 export const formatUsd = (usd: number): string => `$${usd < 10 ? usd.toFixed(2) : usd.toFixed(0)}`
+
+// The windows' short names, in the order they are drawn; another reads as its own name, after them.
+const LIMIT_NAMES: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'spend' }
+const LIMIT_ORDER = Object.keys(LIMIT_NAMES)
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+/** The windows as they are drawn: five hours, then seven days, then the rest as reported. */
+export const orderLimits = (limits: readonly RateLimitRow[]): RateLimitRow[] =>
+  [...limits].sort((a, b) => rank(a.kind) - rank(b.kind))
+
+const rank = (kind: string): number => (LIMIT_ORDER.includes(kind) ? LIMIT_ORDER.indexOf(kind) : LIMIT_ORDER.length)
+
+/** `14:30` for a time later today, `Thu 09:00` past it, in local time. */
+function formatClock(at: Date, now: Date): string {
+  const time = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+
+  return at.toDateString() === now.toDateString() ? time : `${WEEKDAYS[at.getDay()]} ${time}`
+}
+
+/** `5h`, `40%`, `14:30`: the window's name, how much of it is used and when it starts over ("" when unknown). */
+export function limitParts(limit: RateLimitRow, nowMs: number): { name: string; used: string; reset: string } {
+  const used = limit.percentUsed > 0 && limit.percentUsed < 1 ? '<1' : String(Math.round(limit.percentUsed))
+  const resetsAt = limit.resetsAt === undefined ? NaN : Date.parse(limit.resetsAt)
+
+  return {
+    name: LIMIT_NAMES[limit.kind] ?? limit.kind,
+    used: `${used}%`,
+    reset: Number.isNaN(resetsAt) ? '' : formatClock(new Date(resetsAt), new Date(nowMs)),
+  }
+}
 
 export function formatTokens(count: number): string {
   if (count < 1000) return String(count)
