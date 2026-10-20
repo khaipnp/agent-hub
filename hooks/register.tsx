@@ -1,7 +1,18 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { AgentActivity, AgentRow, AgentRowStatus, StepRow, StepStatus, TodoItem, TodoStatus, TurnEndReason } from '../types'
+import type {
+  AgentActivity,
+  AgentRow,
+  AgentRowStatus,
+  ShellRow,
+  ShellStatus,
+  StepRow,
+  StepStatus,
+  TodoItem,
+  TodoStatus,
+  TurnEndReason,
+} from '../types'
 import { innerWidth, MIN_CARD_WIDTH, plural, spinnerFrame, stripRoom } from './card'
 import { framed, row as layoutRow } from './layout'
 import type { Line, Seg } from './layout'
@@ -33,6 +44,22 @@ import {
   latestTask,
   visibleTree,
 } from './roster'
+import {
+  claimFiles,
+  clip,
+  commandLine,
+  DONE_TAIL_LINES,
+  endStatus,
+  finalOutput,
+  MAX_LOG_BYTES,
+  patchRunning,
+  readLog,
+  shellFiles,
+  startShell,
+  TAIL_LINES,
+  toBackground,
+  visibleShells,
+} from './shells'
 import {
   applyStepEnd,
   applyStepStart,
@@ -106,9 +133,16 @@ const BAR_COLOR = 'claude'
 const BAR_FULL_COLOR = 'error'
 const sessionCost = atom({ plugin: 'agent-hub', key: 'sessionCostUsd' } as const, null)
 const rateLimits = atom({ plugin: 'agent-hub', key: 'rateLimits' } as const, [])
-// The steps a running agent's expanded card lists; a finished agent's card
+const shells = atom({ plugin: 'agent-hub', key: 'shells' } as const, [])
+// The steps a running agent's expanded card lists, and the calls under its
+// item in progress: few, so a card stays short; a finished agent's card
 // folds to one line, and the detail view lists them all.
-const CARD_STEPS = 8
+const CARD_STEPS = 3
+const CARD_TASK_STEPS = 3
+// The shells' logs are read every SHELL_EVERY ticks while one runs; the
+// tasks dir is looked for again every SCAN_EVERY polls until found.
+const SHELL_EVERY = 2
+const SCAN_EVERY = 8
 // The size the pane asks for: columns docked beside a fullscreen transcript,
 // rows seated inline above the prompt. A size the person set wins.
 const OPEN_SIZE = { columns: 80, rows: 32 } as const
@@ -158,6 +192,8 @@ const TODO_COLOR: Record<TodoStatus, string> = { pending: 'inactive', in_progres
 // The main checklist drawn as Claude Code draws its own task list.
 const TASK_GLYPH: Record<TodoStatus, string> = { pending: '□', in_progress: '■', completed: '✔' }
 const TASK_COLOR: Record<TodoStatus, string | undefined> = { pending: undefined, in_progress: 'claude', completed: 'success' }
+const SHELL_GLYPH: Record<ShellStatus, string> = { running: '●', done: '✓', failed: '✗', stopped: '⊘' }
+const SHELL_COLOR: Record<ShellStatus, string> = { running: 'claude', done: 'success', failed: 'error', stopped: 'warning' }
 const TASK_WORD: Record<TodoStatus, string> = { pending: 'pending', in_progress: 'in progress', completed: 'done' }
 
 // The pane's heading, "Subagents": Claude's orange, as the theme spells it.
@@ -180,6 +216,122 @@ const openKey = (id: string) => `open:${id}`
 const childKey = (id: string) => `child:${id}`
 
 let ticks = 0
+// Where the engine writes the session's command logs, once found, and the
+// log files already given out or passed over. The module's own: a reload
+// looks again.
+let tasksDir: string | undefined
+let seenFiles: ReadonlySet<string> = new Set()
+let polls = 0
+
+const sanitize = (path: string) => path.replace(/[^a-zA-Z0-9]/g, '-')
+
+// The engine keeps a session's command logs in `<tmp>/claude-<uid>/<project>/<session>/tasks`:
+// the project's folder guessed from the session's start first, then every one.
+async function findTasksDir($: EngineInterface): Promise<string | undefined> {
+  const id = await $.session.id()
+  const guesses = [sanitize(await $.session.root()), sanitize(await $.session.cwd())]
+  const own = await $.env.get('CLAUDE_CODE_TMPDIR')
+  for (const tmp of [own, '/private/tmp', '/tmp']) {
+    if (tmp === undefined) continue
+    const roots = (await $.fs.list(tmp).catch(() => [])).filter(one => one.kind === 'dir' && one.name.startsWith('claude-'))
+    for (const root of roots) {
+      const projects = (await $.fs.list(`${tmp}/${root.name}`).catch(() => [])).filter(one => one.kind === 'dir')
+      const names = [...new Set([...guesses, ...projects.map(one => one.name)])]
+      for (const name of names) {
+        const dir = `${tmp}/${root.name}/${name}/${id}/tasks`
+        if (await $.fs.exists(dir).catch(() => false)) return dir
+      }
+    }
+  }
+
+  return undefined
+}
+
+// Found: the logs there before any shell now waiting began are someone else's.
+async function useTasksDir($: EngineInterface, dir: string) {
+  if (tasksDir === dir) return
+  tasksDir = dir
+  const waiting = (await read($, shells)).filter(one => one.status === 'running' && one.taskId === undefined)
+  const since = Math.min(await $.clock.now(), ...waiting.map(one => one.startedAt))
+  const entries = await $.fs.list(dir).catch(() => [])
+  seenFiles = new Set([...seenFiles, ...shellFiles(entries, since)])
+}
+
+// Reads each running shell's log, when it grew, and gives new logs to the shells waiting for one.
+async function pollShells($: EngineInterface) {
+  const before = await read($, shells)
+  if (!before.some(one => one.status === 'running')) return
+  if (tasksDir === undefined) {
+    if (polls++ % SCAN_EVERY !== 0) return
+    const found = await findTasksDir($)
+    if (found === undefined) return
+    await useTasksDir($, found)
+  }
+  const dir = tasksDir!
+  let list = before
+  if (list.some(one => one.status === 'running' && !one.isBackground && one.taskId === undefined)) {
+    const entries = await $.fs.list(dir).catch(() => undefined)
+    if (entries !== undefined) {
+      const claimed = claimFiles(list, shellFiles(entries), seenFiles)
+      seenFiles = claimed.seen
+      if (claimed.shells.some((one, i) => one.taskId !== list[i]?.taskId)) {
+        const given = new Map(claimed.shells.map(one => [one.id, one.taskId]))
+        list = await update($, shells, rows =>
+          rows.map(one => (one.taskId === undefined && given.get(one.id) !== undefined ? { ...one, taskId: given.get(one.id) } : one)),
+        )
+      }
+    }
+  }
+  for (const row of list) {
+    if (row.status !== 'running' || row.taskId === undefined) continue
+    const path = `${dir}/${row.taskId}.output`
+    const stat = await $.fs.stat(path).catch(() => undefined)
+    const t = await $.clock.now()
+    // A foreground log goes as its command ends, the result telling how; a
+    // background one gone is a command stopped.
+    if (stat === undefined) {
+      if (row.isBackground) await update($, shells, rows => patchRunning(rows, row.id, { status: 'stopped', endedAt: t }))
+      continue
+    }
+    if (stat.size === row.size) continue
+    if (stat.size > MAX_LOG_BYTES) {
+      const tail = [`… ${formatTokens(stat.size)}B of output, too much to tail here`]
+      await update($, shells, rows => patchRunning(rows, row.id, { tail, size: stat.size }))
+      continue
+    }
+    const text = await $.fs.read(path).catch(() => undefined)
+    if (typeof text !== 'string') continue
+    const log = readLog(text)
+    const exitCode = row.isBackground ? log.exitCode : undefined
+    const end: Partial<ShellRow> =
+      exitCode === undefined ? {} : { status: exitCode === 0 ? 'done' : 'failed', exitCode, endedAt: t }
+    await update($, shells, rows => patchRunning(rows, row.id, { tail: log.tail, size: stat.size, ...end }))
+  }
+}
+
+// A command's call settled: moved to the background it keeps running under
+// the id the result gives; otherwise it ended, its output the result's own.
+async function settleShell($: EngineInterface, id: string, ran: ToolCallResult) {
+  const record = typeof ran.result === 'object' && ran.result !== null ? (ran.result as Record<string, unknown>) : {}
+  const taskId = typeof record.backgroundTaskId === 'string' ? record.backgroundTaskId : undefined
+  if (taskId !== undefined && ran.deny === undefined) {
+    const named = /(\/\S+)\/b[a-z0-9]+\.output/.exec(ran.text ?? '')?.[1]
+    if (named !== undefined && tasksDir === undefined) await useTasksDir($, named)
+    await update($, shells, rows => toBackground(rows, id, taskId))
+
+    return
+  }
+  const t = await $.clock.now()
+  const { output, exitCode } = finalOutput(ran.result, ran.text)
+  const { tail } = readLog(output)
+  const status = endStatus(ran)
+  const code = exitCode ?? (status === 'done' ? 0 : undefined)
+  await update($, shells, rows =>
+    rows.map(one =>
+      one.id === id ? { ...one, status, endedAt: t, exitCode: code, tail: tail.length > 0 ? tail : one.tail } : one,
+    ),
+  )
+}
 
 // Reads the engine's roster and folds it in, writing only on a change so an
 // idle session redraws nothing.
@@ -211,9 +363,11 @@ async function refresh($: EngineInterface) {
 async function tick($: EngineInterface) {
   ticks += 1
   if (ticks % LIST_EVERY === 0) await refresh($)
+  if (ticks % SHELL_EVERY === 0) await pollShells($).catch(() => undefined)
+  const isShellBusy = (await read($, shells)).some(one => one.status === 'running')
   const isTaskBusy = Object.values(await read($, taskLogs)).some(log => log.steps.at(-1)?.status === 'running')
   const isTaskOpen = (await read($, tasks)).some(item => item.status === 'in_progress')
-  if (hasActive(await read($, agents)) || isTaskBusy || isTaskOpen) {
+  if (hasActive(await read($, agents)) || isTaskBusy || isTaskOpen || isShellBusy) {
     const t = await $.clock.now()
     await update($, now, () => t)
   }
@@ -303,6 +457,12 @@ export const register: Register = on => {
       })
       .catch(() => undefined)
     void $.ui.open({ id: PANE, title: TITLE, ...OPEN_SIZE })
+    // A foreground command running when the mod reloaded has no result to
+    // come: it is over as far as the pane can tell. A background one keeps its log.
+    const reloadedAt = await $.clock.now()
+    await update($, shells, list =>
+      list.map(one => (one.status === 'running' && !one.isBackground ? { ...one, status: 'stopped' as const, endedAt: reloadedAt } : one)),
+    ).catch(() => undefined)
     $.clock.every(TICK_MS, () => void tick($).catch(() => undefined))
     // The checklist as it stands when the mod loads; each plan call keeps it current after.
     void $.tool
@@ -403,6 +563,52 @@ export const register: Register = on => {
     }
 
     return next(e)
+  })
+
+  // Every Bash call, the main conversation's and each subagent's, is a shell
+  // in the pane. The watching fails quietly; the call's own failure is the call's.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const t = await $.clock.now().catch(() => 0)
+    const id = e.tool_use_id ?? `shell:${t}`
+    const row: ShellRow = {
+      id,
+      command: String(e.command ?? ''),
+      description: typeof e.description === 'string' && e.description !== '' ? e.description : undefined,
+      agentId: e.agentId,
+      task: await read($, task).catch(() => 0),
+      status: 'running',
+      isBackground: e.run_in_background === true,
+      startedAt: t,
+      tail: [],
+    }
+    await update($, shells, list => startShell(list, row)).catch(() => undefined)
+    // The tasks dir not found yet: the next poll looks for it.
+    if (tasksDir === undefined) polls = 0
+    let ran: ToolCallResult
+    try {
+      ran = await next(e)
+    } catch (error) {
+      const ended = await $.clock.now().catch(() => t)
+      await update($, shells, list => patchRunning(list, id, { status: 'stopped', endedAt: ended })).catch(() => undefined)
+      throw error
+    }
+    await settleShell($, id, ran).catch(() => undefined)
+
+    return ran
+  })
+
+  // A background command stopped by its id ends its shell.
+  on('tool.call', { tool: 'TaskStop' }, async ($, e, next) => {
+    const ran = await next(e)
+    const stopped = e.task_id ?? e.shell_id
+    if (stopped !== undefined && ran.deny === undefined && ran.isError !== true) {
+      const t = await $.clock.now().catch(() => 0)
+      await update($, shells, list =>
+        list.map(one => (one.taskId === stopped && one.status === 'running' ? { ...one, status: 'stopped' as const, endedAt: t } : one)),
+      ).catch(() => undefined)
+    }
+
+    return ran
   })
 
   // Watching must never stand in a tool's way: a failure here passes the call on.
@@ -515,10 +721,12 @@ export const register: Register = on => {
     const isAll = await read($, showAll)
     const checklist = await read($, tasks)
     const logs = await read($, taskLogs)
+    const shellRows = await read($, shells)
+    const currentPrompt = await read($, task)
     // The list keeps to the latest task unless the person asked for all;
     // the detail view still finds any agent's children.
     const allLines = visibleTree(rows)
-    const lines = isAll ? allLines : visibleTree(latestTask(rows, await read($, task)))
+    const lines = isAll ? allLines : visibleTree(latestTask(rows, currentPrompt))
     const hidden = allLines.length - lines.length
     const frame = spinnerFrame(t, TICK_MS)
     const columns = e.props.bodyColumns
@@ -722,7 +930,7 @@ export const register: Register = on => {
       const underTask = (item: TodoItem): Line[] => {
         const since = item.startedAt === undefined ? steps : steps.filter(step => step.startedAt >= item.startedAt!)
         // Compact keeps the latest call alone.
-        const shown = since.slice(expanded ? -TASK_LOG_STEPS : -1)
+        const shown = since.slice(expanded ? -CARD_TASK_STEPS : -1)
         const hidden = since.length - shown.length
 
         return [
@@ -1017,6 +1225,67 @@ export const register: Register = on => {
         </Text>
       )
 
+    // The shells: one terminal a lane, its command pinned on top, its log's
+    // latest lines under it, as a terminal scrolls; the lane's next command
+    // takes its place. A running card keeps its height as its log grows.
+    const shownShells = visibleShells(shellRows, currentPrompt)
+    const shellsRunning = shellRows.filter(one => one.status === 'running').length
+    const shellTime = (one: ShellRow) => formatElapsed(Math.max(0, (one.endedAt ?? Math.max(t, one.startedAt)) - one.startedAt))
+    const shellCard = (one: ShellRow) => {
+      const isRunning = one.status === 'running'
+      const width = Math.max(MIN_CARD_WIDTH, columns)
+      const inner = innerWidth(width)
+      const owner = one.agentId === undefined ? 'main' : (rows[one.agentId]?.type ?? 'agent')
+      const end = isRunning
+        ? ''
+        : one.status === 'stopped'
+          ? ' · stopped'
+          : one.exitCode === undefined
+            ? ''
+            : ` · exit ${one.exitCode}`
+      const keep = isRunning ? TAIL_LINES : DONE_TAIL_LINES
+      const tail = one.tail.slice(-keep)
+      const logRows: Line[] = [
+        ...tail.map(text => [{ text: clip(text, inner), dim: true }]),
+        ...(isRunning && tail.length === 0 ? [[{ text: 'waiting for output…', dim: true }]] : []),
+      ]
+      // Running, the log keeps its rows, filled from the top as it grows.
+      const blank = isRunning ? Math.max(0, TAIL_LINES - logRows.length) : 0
+      const body: Line[] = [
+        [
+          { text: '$ ', color: TITLE_COLOR, bold: true },
+          { text: clip(commandLine(one.command), Math.max(0, inner - 2)), bold: isRunning },
+        ],
+        ...logRows,
+        ...Array.from({ length: blank }, (): Line => []),
+      ]
+      const dimmed = (segs: Seg[]) => (isRunning ? segs : segs.map(seg => ({ ...seg, dim: true })))
+      const title = {
+        left: dimmed([
+          { text: isRunning ? frame : SHELL_GLYPH[one.status], color: SHELL_COLOR[one.status] },
+          { text: ` ${one.description ?? 'shell'}`, color: 'text', bold: isRunning },
+        ]),
+        right: dimmed([{ text: `${owner}${one.isBackground ? ' · bg' : ''} · ${shellTime(one)}${end}`, color: 'text' }]),
+      }
+
+      return (
+        <Text key={`shell:${one.id}`}>
+          {drawLines(framed(body.map(dimmed), width, { color: SHELL_COLOR[one.status], dim: !isRunning }, title))}
+        </Text>
+      )
+    }
+    const shellGroup =
+      shellRows.length === 0 ? null : (
+        <Box flexDirection="column">
+          <Text>
+            <Text bold>
+              <Text color={TITLE_COLOR}>Shells</Text>: {shellsRunning} running · {shellRows.length - shellsRunning} done
+            </Text>
+          </Text>
+          {shownShells.map(shellCard)}
+        </Box>
+      )
+
     // How full the session's context window is, as one bar the pane's width.
     const contextGroup = (() => {
       if (fill === null || fill.window <= 0) {
@@ -1131,6 +1400,8 @@ export const register: Register = on => {
               {e.props.isFocused ? 'tab: next card · enter: open · e: compact/expand · a: all agents' : 'ctrl+x tab: select a card'}
             </Text>
           )}
+          {shellGroup === null ? null : rule}
+          {shellGroup}
         </Box>
         {usageGroup === null ? null : rule}
         {usageGroup}
