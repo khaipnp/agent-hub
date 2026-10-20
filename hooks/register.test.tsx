@@ -366,14 +366,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     expect(await ui.find({ type: 'Text', text: ' · 12 tools · 5.0k tok' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'src/file10.ts' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'src/file3.ts' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'src/file2.ts' })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: '… 3 earlier steps · enter: all' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'src/file8.ts' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'src/file7.ts' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: '… 8 earlier steps · enter: all' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'docs/design.md' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: '1 tool · done' })).toBeDefined()
 
     await ui.press({ key: 'expand' })
-    expect(await ui.find({ type: 'Text', text: 'src/file3.ts' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'src/file8.ts' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: 'src/file10.ts' })).toBeDefined()
     expect((await ui.find({ key: 'expand' }))?.props.label).toBe('expand')
 
@@ -717,4 +717,126 @@ test('the main loop’s own turns add no row', async ($, on) => {
   })
 
   expect(await ui.find({ type: 'Text', text: 'Subagents: 0 running · 0 done' })).toBeDefined()
+})
+
+// A tasks dir the engine writes command logs to, as a test sets it.
+function tasksDir(on: On) {
+  const dir = '/private/tmp/claude-501/-proj/sid/tasks'
+  const files: Record<string, { text: string; mtimeMs: number }> = {}
+  on('session.id', () => ({ value: 'sid' }))
+  on('session.root', () => ({ value: '/proj' }))
+  on('session.cwd', () => ({ value: '/proj' }))
+  on('env.get', () => ({ value: undefined }))
+  on('fs.list', (_$, e) =>
+    e.path === '/private/tmp'
+      ? { value: [{ name: 'claude-501', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }
+      : e.path === '/private/tmp/claude-501'
+        ? { value: [{ name: '-proj', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }
+        : e.path === dir
+          ? {
+              value: Object.entries(files).map(([name, file]) => ({
+                name,
+                kind: 'file',
+                size: file.text.length,
+                mtimeMs: file.mtimeMs,
+                isLink: false,
+              })),
+            }
+          : { value: [] },
+  )
+  on('fs.exists', (_$, e) => ({ value: e.path === dir }))
+  const named = (path: string) => files[path.slice(dir.length + 1)]
+  on('fs.stat', (_$, e) => {
+    const file = named(e.path)
+
+    return file === undefined
+      ? { deny: 'ENOENT' }
+      : { value: { kind: 'file', size: file.text.length, mtimeMs: file.mtimeMs, isLink: false } }
+  })
+  on('fs.read', (_$, e) => {
+    const file = named(e.path)
+
+    return file === undefined ? { deny: 'ENOENT' } : { value: file.text }
+  })
+
+  return files
+}
+
+test('a running shell pins its command over its log; the next command takes its place', async ($, on) => {
+  const { clock } = engine(on)
+  const files = tasksDir(on)
+  files['bold.output'] = { text: 'from before\n', mtimeMs: 1 }
+  const calls: Record<string, () => void> = {}
+  on('tool.call', async (_$, e) => {
+    const id = String(e.tool_use_id)
+    await new Promise<void>(resolve => (calls[id] = resolve))
+
+    return { result: { stdout: id === 'u1' ? 'compiled\n3 passed\n' : 'clean', stderr: '', interrupted: false }, text: 'ok' }
+  })
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  const first = $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run the tests', tool_use_id: 'u1' } as never)
+  await clock.settle()
+  files['bfirst.output'] = { text: 'compiled\n\x1b[32m2 passed\x1b[0m\n', mtimeMs: 2_000_000 }
+  await clock.advance(2000)
+  await clock.settle()
+
+  expect(await ui.find({ type: 'Text', text: /^Shells: 1 running · 0 done$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' Run the tests' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'npm test' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '2 passed' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'from before' })).toBeUndefined()
+
+  calls.u1!()
+  await first
+  delete files['bfirst.output']
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: '3 passed' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Shells: 0 running · 1 done$/ })).toBeDefined()
+
+  const second = $.tool.call({ tool: 'Bash', command: 'git status', tool_use_id: 'u2' } as never)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: 'git status' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'npm test' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'waiting for output…' })).toBeDefined()
+
+  calls.u2!()
+  await second
+  await ui.unmount()
+})
+
+test("a background shell runs until its log's exit line, under the agent that started it", async ($, on) => {
+  const { roster, clock } = engine(on)
+  const files = tasksDir(on)
+  on('tool.call', () => ({
+    result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bsrv' },
+    text: 'Command running in background with ID: bsrv. Output is being written to: /private/tmp/claude-501/-proj/sid/tasks/bsrv.output',
+  }))
+  roster.list = [{ id: 'a1', type: 'Explore', description: 'serve it', status: 'running' }]
+  await $.turn.start({ text: 'go', turnId: 't1', agentId: 'a1' })
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', run_in_background: true, tool_use_id: 'u1', agentId: 'a1' } as never)
+  files['bsrv.output'] = { text: 'ready on :3000\n', mtimeMs: 2_000_000 }
+  await clock.advance(2000)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: 'ready on :3000' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Explore · bg · / })).toBeDefined()
+
+  files['bsrv.output'] = { text: 'ready on :3000\nEADDRINUSE\n\n[exited with code 1]\n', mtimeMs: 2_001_000 }
+  await clock.advance(2000)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Shells: 0 running · 1 done$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /· exit 1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'EADDRINUSE' })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('no shell yet, no Shells group', async ($, on) => {
+  engine(on)
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  expect(await ui.find({ type: 'Text', text: /^Shells/ })).toBeUndefined()
+  await ui.unmount()
 })
